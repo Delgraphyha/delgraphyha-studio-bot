@@ -1,6 +1,9 @@
 python-telegram-bot[webhooks]
-apscheduler
-ffmpeg-python
-pytz
 Flask
 yt-dlp
+ffmpeg-python
+python-dotenv
+Pillow
+arabic-reshaper
+python-bidi
+requests
