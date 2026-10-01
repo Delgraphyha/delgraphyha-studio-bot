@@ -6,781 +6,481 @@ import shutil
 import asyncio
 import unicodedata
 from difflib import SequenceMatcher
-import threading
 from pathlib import Path
+from io import BytesIO
 
-from flask import Flask, request
+import requests
+import yt_dlp
+from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
+import arabic_reshaper
+from bidi.algorithm import get_display
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatMemberStatus
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters,
 )
 
-import yt_dlp
+load_dotenv()
 
-
-TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHANNEL_USERNAME = "@delgraphyha"
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@Delgraphyha").strip()
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 
 DOWNLOAD_ROOT = Path("downloads")
 DOWNLOAD_ROOT.mkdir(exist_ok=True)
-
 SEARCH_RESULTS_PER_SOURCE = 8
 SEARCH_COOLDOWN_SECONDS = 5
-
-# محدود کردن فشار روی سایت‌ها
 last_search_time = {}
-
-# فایل کوکی فقط یک بار ساخته می‌شود
 COOKIES_FILE = None
 
-application = None
-background_loop = None
+COLORS = {
+    "white": (255, 255, 255, 255),
+    "black": (0, 0, 0, 255),
+    "gold": (212, 175, 55, 255),
+    "red": (220, 35, 55, 255),
+}
 
-app = Flask(__name__)
+TEXT_STYLES = {
+    "nastaliq": "🖋 نستعلیق",
+    "hand": "✍️ دست‌نویس",
+    "modern": "🔷 مدرن",
+    "bold": "🔠 بولد",
+}
+
+def font_path(style="modern"):
+    env_font = os.getenv("PERSIAN_FONT")
+    base = Path(__file__).resolve().parent
+
+    candidates_by_style = {
+        "nastaliq": [
+            os.getenv("PERSIAN_FONT_NASTALIQ"),
+            str(base / "fonts" / "nastaliq.ttf"),
+            "C:/Windows/Fonts/IranNastaliq.ttf",
+            env_font,
+            "C:/Windows/Fonts/tahoma.ttf",
+        ],
+        "hand": [
+            os.getenv("PERSIAN_FONT_HAND"),
+            str(base / "fonts" / "handwriting.ttf"),
+            env_font,
+            "C:/Windows/Fonts/segoepr.ttf",
+            "C:/Windows/Fonts/tahoma.ttf",
+        ],
+        "modern": [
+            os.getenv("PERSIAN_FONT_MODERN"),
+            str(base / "fonts" / "modern.ttf"),
+            env_font,
+            "C:/Windows/Fonts/tahoma.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ],
+        "bold": [
+            os.getenv("PERSIAN_FONT_BOLD"),
+            str(base / "fonts" / "bold.ttf"),
+            env_font,
+            "C:/Windows/Fonts/tahomabd.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/tahoma.ttf",
+        ],
+    }
+
+    for p in candidates_by_style.get(style, candidates_by_style["modern"]):
+        if p and Path(p).exists():
+            return p
+    raise FileNotFoundError(f"فونت مناسب برای مدل {TEXT_STYLES.get(style, style)} پیدا نشد.")
 
 
-# ----------------------------
-# Flask / Healthcheck / Webhook
-# ----------------------------
+def main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎵 جستجو و دریافت موزیک", callback_data="menu_music")],
+        [InlineKeyboardButton("✍️ ساخت نوشته فارسی", callback_data="menu_text")],
+        [InlineKeyboardButton("🎙️ تبدیل متن فارسی به صدا", callback_data="menu_voice")],
+    ])
 
-@app.route("/")
-def home():
-    return "Bot is running and alive!", 200
+def back_menu():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_home")]])
 
+def sub_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 عضویت در Delgraphyha",
+                              url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")],
+        [InlineKeyboardButton("✅ عضو شدم، بررسی کن", callback_data="check_sub")],
+    ])
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    global application, background_loop
-
-    if not application or not background_loop:
-        return "Bot not ready", 503
-
+async def is_member(user_id, context):
     try:
-        json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, application.bot)
-
-        asyncio.run_coroutine_threadsafe(
-            application.process_update(update),
-            background_loop
-        )
-
-        return "OK", 200
-
+        m = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        return m.status in {
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        }
     except Exception as e:
-        print(f"Webhook error: {e}")
-        return "ERROR", 500
+        print("Membership check:", repr(e))
+        return False
 
-
-# ----------------------------
-# Helpers
-# ----------------------------
-
-def start_background_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
+async def require_member(update, context):
+    if await is_member(update.effective_user.id, context):
+        return True
+    msg = "❤️ برای استفاده از امکانات بات ابتدا عضو @Delgraphyha شوید."
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(msg, reply_markup=sub_menu())
+        except Exception:
+            await update.callback_query.message.reply_text(msg, reply_markup=sub_menu())
+    else:
+        await update.effective_message.reply_text(msg, reply_markup=sub_menu())
+    return False
 
 def setup_cookies():
     global COOKIES_FILE
+    content = os.getenv("YOUTUBE_COOKIES", "").strip()
+    if content:
+        Path("cookies.txt").write_text(content, encoding="utf-8")
+        COOKIES_FILE = "cookies.txt"
+    elif Path("cookies.txt").exists():
+        COOKIES_FILE = "cookies.txt"
 
-    cookies_content = os.getenv("YOUTUBE_COOKIES", "").strip()
+def ydl_base():
+    o = {
+        "quiet": True, "no_warnings": True, "noplaylist": True,
+        "ignoreerrors": True, "socket_timeout": 30,
+        "retries": 3, "fragment_retries": 3,
+    }
+    if COOKIES_FILE:
+        o["cookiefile"] = COOKIES_FILE
+    return o
 
-    if not cookies_content:
-        COOKIES_FILE = None
-        return
+def is_url(s):
+    return bool(re.match(r"^https?://", s.strip(), re.I))
 
-    cookie_path = Path("cookies.txt")
-    cookie_path.write_text(cookies_content, encoding="utf-8")
-    COOKIES_FILE = str(cookie_path)
-
-
-def is_url(text: str) -> bool:
-    return bool(re.match(r"^https?://", text.strip(), flags=re.IGNORECASE))
-
-
-def format_duration(seconds):
-    if seconds is None:
-        return ""
-
+def duration_text(v):
     try:
-        seconds = int(seconds)
+        v = int(v)
     except (TypeError, ValueError):
         return ""
+    m, s = divmod(v, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-    minutes, seconds = divmod(seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-
-    if hours:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
-
-    return f"{minutes}:{seconds:02d}"
-
-
-def base_ydl_options():
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "ignoreerrors": True,
-        "socket_timeout": 25,
-        "retries": 2,
-    }
-
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
-
-    return opts
-
-
-# ----------------------------
-# Subscription
-# ----------------------------
-
-async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    try:
-        member = await context.bot.get_chat_member(
-            chat_id=CHANNEL_USERNAME,
-            user_id=user_id
-        )
-
-        return member.status in [
-            "member",
-            "creator",
-            "administrator",
-        ]
-
-    except Exception as e:
-        print(f"Subscription check error: {e}")
-        return False
-
-
-async def require_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    # داخل گروه محدودیت عضویت اعمال نمی‌شود
-    if update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        return True
-
-    user_id = update.effective_user.id
-
-    if await check_subscription(user_id, context):
-        return True
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "📢 عضویت در کانال",
-                url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✅ عضو شدم، بررسی کن",
-                callback_data="check_sub"
-            )
-        ]
-    ]
-
-    text = (
-        "⚠️ برای استفاده از ربات ابتدا در کانال عضو شوید:\n"
-        f"{CHANNEL_USERNAME}"
-    )
-
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception:
-            pass
-    elif update.message:
-        await update.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    return False
-
-
-# ----------------------------
-# Search
-# ----------------------------
-
-def normalize_search_entry(entry, source):
-    if not entry:
+def normalize_entry(e, source):
+    if not e:
         return None
-
-    title = entry.get("title") or "Unknown"
-    uploader = (
-        entry.get("uploader")
-        or entry.get("channel")
-        or entry.get("artist")
-        or ""
-    )
-
-    duration = entry.get("duration")
-    webpage_url = entry.get("webpage_url")
-
-    # ytsearch در بعضی حالت‌ها فقط ID می‌دهد
-    if source == "YouTube":
-        video_id = entry.get("id")
-
-        if not webpage_url and video_id:
-            webpage_url = f"https://www.youtube.com/watch?v={video_id}"
-
-    if source == "SoundCloud":
-        if not webpage_url:
-            url_value = entry.get("url")
-            if isinstance(url_value, str) and url_value.startswith("http"):
-                webpage_url = url_value
-
-    if not webpage_url:
+    url = e.get("webpage_url")
+    if source == "YouTube" and not url and e.get("id"):
+        url = f"https://www.youtube.com/watch?v={e['id']}"
+    if source == "SoundCloud" and not url and str(e.get("url", "")).startswith("http"):
+        url = e["url"]
+    if not url:
         return None
-
     return {
-        "title": title,
-        "uploader": uploader,
-        "duration": duration,
+        "title": e.get("title") or "Unknown",
+        "uploader": e.get("uploader") or e.get("channel") or e.get("artist") or "",
+        "duration": e.get("duration"),
         "source": source,
-        "url": webpage_url,
+        "url": url,
     }
 
-
-def search_with_prefix(query_text: str, prefix: str, source: str, limit: int):
-    opts = base_ydl_options()
-    opts.update({
-        "skip_download": True,
-        "extract_flat": True,
-    })
-
-    search_query = f"{prefix}{limit}:{query_text}"
-
+def search_source(q, prefix, source):
+    o = ydl_base()
+    o.update({"skip_download": True, "extract_flat": True})
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(search_query, download=False)
-
-        if not info:
-            return []
-
-        entries = info.get("entries") or []
-        results = []
-
-        for entry in entries:
-            item = normalize_search_entry(entry, source)
-
-            if item:
-                results.append(item)
-
-        return results
-
+        with yt_dlp.YoutubeDL(o) as y:
+            info = y.extract_info(f"{prefix}{SEARCH_RESULTS_PER_SOURCE}:{q}", download=False)
+        return [x for e in ((info or {}).get("entries") or [])
+                if (x := normalize_entry(e, source))]
     except Exception as e:
-        print(f"{source} search error: {e}")
+        print(f"Search {source}:", repr(e))
         return []
 
-
-def inspect_direct_url(url: str):
-    opts = base_ydl_options()
-    opts.update({
-        "skip_download": True,
-        "noplaylist": True,
-    })
-
+def direct_info(url):
+    o = ydl_base()
+    o.update({"skip_download": True})
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        if not info:
+        with yt_dlp.YoutubeDL(o) as y:
+            e = y.extract_info(url, download=False)
+        if e and e.get("entries"):
+            e = e["entries"][0]
+        if not e:
             return None
-
-        if "entries" in info and info.get("entries"):
-            info = info["entries"][0]
-
         return {
-            "title": info.get("title") or "Unknown",
-            "uploader": (
-                info.get("uploader")
-                or info.get("channel")
-                or info.get("artist")
-                or ""
-            ),
-            "duration": info.get("duration"),
-            "source": info.get("extractor_key") or info.get("extractor") or "Direct Link",
-            "url": info.get("webpage_url") or url,
+            "title": e.get("title") or "Unknown",
+            "uploader": e.get("uploader") or e.get("channel") or "",
+            "duration": e.get("duration"),
+            "source": e.get("extractor_key") or "Direct",
+            "url": e.get("webpage_url") or url,
         }
-
     except Exception as e:
-        print(f"Direct URL inspect error: {e}")
+        print("Direct URL:", repr(e))
         return None
 
+async def search_music(q):
+    if is_url(q):
+        x = await asyncio.to_thread(direct_info, q)
+        return [x] if x else []
 
-async def search_music(query_text: str):
-    # Direct URL from any yt-dlp-supported site
-    if is_url(query_text):
-        item = await asyncio.to_thread(inspect_direct_url, query_text)
-        return [item] if item else []
+    def clean(s):
+        s = unicodedata.normalize("NFKC", (s or "").lower())
+        return " ".join(re.sub(r"[^\w\s]", " ", s).split())
 
-    def clean_text(value: str) -> str:
-        value = unicodedata.normalize("NFKC", (value or "").lower())
-        value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
-        return " ".join(value.split())
+    def score(x):
+        q1, t, u = clean(q), clean(x["title"]), clean(x["uploader"])
+        hay = f"{t} {u}"
+        qw, tw, hw = set(q1.split()), set(t.split()), set(hay.split())
+        s = SequenceMatcher(None, q1, t).ratio() * 55
+        s += SequenceMatcher(None, q1, hay).ratio() * 20
+        if q1 == t: s += 35
+        elif q1 in t: s += 22
+        elif q1 in hay: s += 12
+        if qw:
+            s += len(qw & tw) / len(qw) * 35
+            s += len(qw & hw) / len(qw) * 15
+        bad = {"karaoke":14,"reaction":18,"tutorial":18,"cover":8,
+               "remix":6,"slowed":8,"reverb":8,"instrumental":6}
+        for w, p in bad.items():
+            if w in tw and w not in qw: s -= p
+        if x["source"] == "YouTube": s += 5
+        return s
 
-    def score_result(item: dict) -> float:
-        query = clean_text(query_text)
-        title = clean_text(item.get("title", ""))
-        uploader = clean_text(item.get("uploader", ""))
-        haystack = f"{title} {uploader}".strip()
+    items = await asyncio.to_thread(search_source, q, "ytsearch", "YouTube")
+    if len(items) < 6:
+        items += await asyncio.to_thread(search_source, q, "scsearch", "SoundCloud")
+    out, seen = [], set()
+    for x in items:
+        if x["url"] in seen: continue
+        seen.add(x["url"])
+        x["score"] = score(x)
+        out.append(x)
+    return sorted(out, key=lambda z: z["score"], reverse=True)[:8]
 
-        if not query or not haystack:
-            return 0.0
-
-        query_words = set(query.split())
-        title_words = set(title.split())
-        all_words = set(haystack.split())
-
-        # Exact query/title matches matter most.
-        score = SequenceMatcher(None, query, title).ratio() * 55
-        score += SequenceMatcher(None, query, haystack).ratio() * 20
-
-        if query == title:
-            score += 35
-        elif query in title:
-            score += 22
-        elif query in haystack:
-            score += 12
-
-        if query_words:
-            score += (len(query_words & title_words) / len(query_words)) * 35
-            score += (len(query_words & all_words) / len(query_words)) * 15
-
-        # Prefer sensible song-length results over very long videos/streams.
-        duration = item.get("duration")
-        if isinstance(duration, (int, float)):
-            if 90 <= duration <= 600:
-                score += 8
-            elif duration > 1200:
-                score -= 15
-
-        # Usually the user wants the original track, not these variants.
-        penalty_words = {
-            "karaoke": 14,
-            "reaction": 18,
-            "tutorial": 18,
-            "cover": 8,
-            "remix": 6,
-            "slowed": 8,
-            "reverb": 8,
-            "instrumental": 6,
-            "live": 4,
-        }
-        for word, penalty in penalty_words.items():
-            if word in title_words and word not in query_words:
-                score -= penalty
-
-        # YouTube is the primary source; SoundCloud remains a fallback.
-        if item.get("source") == "YouTube":
-            score += 5
-
-        return score
-
-    # Search YouTube first with a larger candidate pool.
-    youtube_results = await asyncio.to_thread(
-        search_with_prefix,
-        query_text,
-        "ytsearch",
-        "YouTube",
-        SEARCH_RESULTS_PER_SOURCE,
-    )
-
-    candidates = list(youtube_results)
-
-    # SoundCloud is a fallback/additional source, not an alternating list.
-    # Search it when YouTube returned only a few usable candidates.
-    if len(candidates) < 6:
-        soundcloud_results = await asyncio.to_thread(
-            search_with_prefix,
-            query_text,
-            "scsearch",
-            "SoundCloud",
-            SEARCH_RESULTS_PER_SOURCE,
-        )
-        candidates.extend(soundcloud_results)
-
-    # Remove duplicate URLs before ranking.
-    unique = []
-    seen_urls = set()
-    for item in candidates:
-        url = item.get("url")
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-        item["score"] = score_result(item)
-        unique.append(item)
-
-    unique.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return unique[:8]
-
-
-# ----------------------------
-# Download
-# ----------------------------
-
-def download_audio(url: str, user_id: int):
-    job_id = uuid.uuid4().hex[:12]
-    user_dir = DOWNLOAD_ROOT / str(user_id) / job_id
-    user_dir.mkdir(parents=True, exist_ok=True)
-
-    output_template = str(user_dir / "track.%(ext)s")
-
-    opts = base_ydl_options()
-    opts.update({
+def download_audio(url, user_id):
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("FFmpeg روی سیستم پیدا نشد.")
+    d = DOWNLOAD_ROOT / str(user_id) / uuid.uuid4().hex[:10]
+    d.mkdir(parents=True, exist_ok=True)
+    o = ydl_base()
+    o.update({
         "format": "bestaudio/best",
-        "outtmpl": output_template,
-        "noplaylist": True,
+        "outtmpl": str(d / "track.%(ext)s"),
         "ignoreerrors": False,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "128",
-            }
-        ],
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "128",
+        }],
     })
-
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-
-        if not info:
-            raise RuntimeError("No media information returned")
-
-        title = info.get("title") or "Music"
-
-        mp3_files = list(user_dir.glob("*.mp3"))
-
-        if not mp3_files:
-            raise FileNotFoundError("MP3 output not found")
-
-        return {
-            "file_path": str(mp3_files[0]),
-            "title": title,
-            "work_dir": str(user_dir),
-        }
-
-    except Exception as e:
-        print(f"yt-dlp download error for {url}: {type(e).__name__}: {e}")
-        shutil.rmtree(user_dir, ignore_errors=True)
+        with yt_dlp.YoutubeDL(o) as y:
+            info = y.extract_info(url, download=True)
+        files = list(d.glob("*.mp3"))
+        if not files:
+            raise RuntimeError("فایل MP3 ساخته نشد.")
+        return files[0], (info or {}).get("title") or "Music", d
+    except Exception:
+        shutil.rmtree(d, ignore_errors=True)
         raise
 
 
-async def send_downloaded_audio(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    result: dict,
-):
-    query = update.callback_query
-    user_id = query.from_user.id
+def make_png(text, color, style="modern"):
+    fp = font_path()
+    if not fp:
+        raise RuntimeError("فونت فارسی پیدا نشد.")
+    shaped = "\n".join(get_display(arabic_reshaper.reshape(x)) for x in text.splitlines())
+    font = ImageFont.truetype(fp, 96)
+    tmp = Image.new("RGBA", (10, 10))
+    d = ImageDraw.Draw(tmp)
+    b = d.multiline_textbbox((0,0), shaped, font=font, spacing=22, align="center", stroke_width=2)
+    pad = 50
+    w = int(max(100, b[2] - b[0] + 2 * pad))
+    h = int(max(100, b[3] - b[1] + 2 * pad))
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.multiline_text((w/2,pad-b[1]), shaped, font=font, fill=COLORS[color],
+                     anchor="ma", align="center", spacing=22, stroke_width=2,
+                     stroke_fill=(0,0,0,80) if color=="white" else (255,255,255,60))
+    bio = BytesIO()
+    im.save(bio, "PNG")
+    bio.seek(0)
+    bio.name = "delgraphyha_text.png"
+    return bio
 
-    try:
-        await query.edit_message_text(
-            f"⬇️ در حال دریافت:\n{result['title']}\n\n"
-            f"منبع: {result['source']}"
-        )
+def make_voice(text):
+    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
+        raise RuntimeError("تنظیم ElevenLabs هنوز انجام نشده است.")
+    r = requests.post(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
+        headers={"xi-api-key": ELEVENLABS_API_KEY,
+                 "Content-Type":"application/json","Accept":"audio/mpeg"},
+        json={"text":text,"model_id":"eleven_multilingual_v2"},
+        timeout=90,
+    )
+    if not r.ok:
+        raise RuntimeError(f"ElevenLabs HTTP {r.status_code}")
+    b = BytesIO(r.content); b.name = "delgraphyha_voice.mp3"; return b
 
-        downloaded = await asyncio.to_thread(
-            download_audio,
-            result["url"],
-            user_id,
-        )
+async def start(update, context):
+    context.user_data.clear()
+    if not await require_member(update, context): return
+    await update.effective_message.reply_text(
+        "🎬 Delgraphyha Studio | دلگرافیها\n\nابزار موردنظر را انتخاب کنید:",
+        reply_markup=main_menu())
 
-        file_path = downloaded["file_path"]
-        title = downloaded["title"]
+async def command_mode(update, context, mode):
+    if not await require_member(update, context): return
+    context.user_data["mode"] = mode
+    p = {"music":"🎵 نام آهنگ، خواننده یا لینک را بفرست.",
+         "text":"✍️ متن فارسی را بفرست.",
+         "voice":"🎙️ متن فارسی Voice-over را بفرست."}
+    await update.effective_message.reply_text(p[mode], reply_markup=back_menu())
 
-        with open(file_path, "rb") as audio_file:
-            await context.bot.send_audio(
-                chat_id=query.message.chat_id,
-                audio=audio_file,
-                title=title,
-                caption=(
-                    f"🎵 {title}\n"
-                    f"🔎 منبع: {result['source']}\n"
-                    "🤖 Delgraphyha Music Bot"
-                ),
-            )
+async def callback(update, context):
+    q = update.callback_query
+    await q.answer()
 
-        await query.edit_message_text(
-            f"✅ ارسال شد:\n{title}"
-        )
+    if q.data == "check_sub":
+        if await is_member(q.from_user.id, context):
+            context.user_data.clear()
+            await q.edit_message_text("✅ عضویت تأیید شد.", reply_markup=main_menu())
+        else:
+            await q.answer("❌ هنوز عضویت تأیید نشده است.", show_alert=True)
+        return
 
-    except Exception as e:
-        print(f"Download/send error: {e}")
+    if not await require_member(update, context): return
 
+    if q.data == "menu_home":
+        context.user_data.clear()
+        await q.edit_message_text("🎬 Delgraphyha Studio\n\nابزار را انتخاب کنید:", reply_markup=main_menu())
+        return
+
+    if q.data.startswith("menu_"):
+        mode = q.data[5:]
+        context.user_data["mode"] = mode
+        p = {"music":"🎵 نام آهنگ، خواننده یا لینک را بفرست.",
+             "text":"✍️ متن فارسی را بفرست، بعد رنگ را انتخاب می‌کنی.",
+             "voice":"🎙️ متن فارسی Voice-over را بفرست."}
+        await q.edit_message_text(p[mode], reply_markup=back_menu())
+        return
+
+    if q.data.startswith("music_pick_"):
         try:
-            await query.edit_message_text(
-                "❌ دریافت این نتیجه ممکن نشد.\n"
-                "ممکن است منبع محدودیت داشته باشد یا موقتاً در دسترس نباشد."
-            )
+            i = int(q.data.rsplit("_",1)[1])
+            x = context.user_data["results"][i]
         except Exception:
-            pass
-
-    finally:
-        # پاک کردن فایل‌های موقت مربوط به همین کاربر/دانلود
-        user_root = DOWNLOAD_ROOT / str(user_id)
-
-        if user_root.exists():
-            for child in list(user_root.iterdir()):
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
-
-
-# ----------------------------
-# Telegram handlers
-# ----------------------------
-
-async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_subscription(update, context):
-        return
-
-    await update.message.reply_text(
-        "🎵 نام آهنگ، خواننده یا هر عبارتی که می‌خواهید بفرستید.\n\n"
-        "مثال:\n"
-        "Adele Hello\n"
-        "Ebi Khalij\n"
-        "Rammstein Sonne\n"
-        "Tarkan Dudu\n"
-        "Arijit Singh Tum Hi Ho\n\n"
-        "همچنین می‌توانید لینک مستقیم یک آهنگ/ویدیو از سایت‌های پشتیبانی‌شده بفرستید."
-    )
-
-
-async def check_sub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-    is_member = await check_subscription(user_id, context)
-
-    if is_member:
-        await query.edit_message_text(
-            "✅ عضویت تایید شد.\n"
-            "حالا نام آهنگ یا خواننده را بفرستید."
-        )
-    else:
-        await query.answer(
-            "❌ هنوز عضویت شما تایید نشده است.",
-            show_alert=True
-        )
-
-
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    if not await require_subscription(update, context):
-        return
-
-    user_id = update.effective_user.id
-    query_text = update.message.text.strip()
-
-    if len(query_text) < 2:
-        await update.message.reply_text(
-            "❌ نام آهنگ یا خواننده خیلی کوتاه است."
-        )
-        return
-
-    # Rate limit ساده
-    now = time.monotonic()
-    previous = last_search_time.get(user_id, 0)
-
-    if now - previous < SEARCH_COOLDOWN_SECONDS:
-        remaining = int(SEARCH_COOLDOWN_SECONDS - (now - previous)) + 1
-
-        await update.message.reply_text(
-            f"⏳ لطفاً {remaining} ثانیه صبر کنید و دوباره جستجو کنید."
-        )
-        return
-
-    last_search_time[user_id] = now
-
-    processing_msg = await update.message.reply_text(
-        "🔍 در حال جستجو در چند منبع..."
-    )
-
-    try:
-        results = await search_music(query_text)
-
-        if not results:
-            await processing_msg.edit_text(
-                "❌ نتیجه‌ای پیدا نشد.\n"
-                "نام آهنگ و خواننده را دقیق‌تر بنویسید."
-            )
+            await q.edit_message_text("❌ نتیجه منقضی شده. دوباره جستجو کن.", reply_markup=back_menu())
             return
-
-        # نتایج فقط برای همین کاربر ذخیره می‌شود
-        context.user_data["music_search_results"] = results
-
-        keyboard = []
-
-        for index, item in enumerate(results):
-            title = item["title"].replace("\n", " ").strip()
-
-            if len(title) > 45:
-                title = title[:42] + "..."
-
-            duration = format_duration(item.get("duration"))
-            source = item["source"]
-
-            rank = index + 1
-            button_text = f"{rank}. 🎵 {title}"
-
-            if duration:
-                button_text += f" · {duration}"
-
-            button_text += f" [{source}]"
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    button_text,
-                    callback_data=f"music_pick_{index}"
-                )
-            ])
-
-        await processing_msg.edit_text(
-            f"🔎 نتایج برای:\n{query_text}\n\n"
-            "یکی را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    except Exception as e:
-        print(f"Search handler error: {e}")
-
-        await processing_msg.edit_text(
-            "❌ هنگام جستجو خطایی رخ داد. کمی بعد دوباره امتحان کنید."
-        )
-
-
-async def music_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if not await require_subscription(update, context):
+        work = None
+        try:
+            await q.edit_message_text(f"⬇️ در حال دریافت:\n{x['title']}")
+            path, title, work = await asyncio.to_thread(download_audio, x["url"], q.from_user.id)
+            with open(path, "rb") as f:
+                await context.bot.send_audio(q.message.chat_id, f, title=title,
+                    caption=f"🎵 {title}\n🤖 Delgraphyha Studio")
+            await q.edit_message_text("✅ موزیک ارسال شد.", reply_markup=back_menu())
+        except Exception as e:
+            print("Download:", repr(e))
+            await q.edit_message_text(f"❌ دانلود انجام نشد.\n{str(e)[:180]}", reply_markup=back_menu())
+        finally:
+            if work: shutil.rmtree(work, ignore_errors=True)
         return
 
-    try:
-        index = int(query.data.replace("music_pick_", ""))
-    except ValueError:
-        await query.edit_message_text("❌ انتخاب نامعتبر است.")
+    if q.data.startswith("style_"):
+        context.user_data["text_style"] = q.data.replace("style_", "", 1)
+        keyboard = [
+            [InlineKeyboardButton("⚪ سفید", callback_data="color_white"),
+             InlineKeyboardButton("⚫ مشکی", callback_data="color_black")],
+            [InlineKeyboardButton("🟡 طلایی", callback_data="color_gold"),
+             InlineKeyboardButton("🔴 قرمز", callback_data="color_red")],
+        ]
+        await q.edit_message_text("رنگ نوشته را انتخاب کن:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    results = context.user_data.get("music_search_results") or []
+    if q.data.startswith("color_"):
+        text = context.user_data.get("pending_text")
+        if not text:
+            await q.edit_message_text("❌ متن منقضی شده.", reply_markup=back_menu()); return
+        try:
+            img = await asyncio.to_thread(make_png, text, q.data[6:])
+            await context.bot.send_document(q.message.chat_id, img,
+                filename="delgraphyha_text.png",
+                caption="✍️ PNG شفاف | Delgraphyha Studio")
+            await q.edit_message_text("✅ نوشته آماده شد.", reply_markup=back_menu())
+        except Exception as e:
+            await q.edit_message_text(f"❌ {e}", reply_markup=back_menu())
 
-    if index < 0 or index >= len(results):
-        await query.edit_message_text(
-            "❌ نتیجه جستجو منقضی شده است. دوباره جستجو کنید."
-        )
-        return
+async def text_message(update, context):
+    if not await require_member(update, context): return
+    text = update.message.text.strip()
+    mode = context.user_data.get("mode")
+    if not mode:
+        await update.message.reply_text("اول ابزار را انتخاب کن:", reply_markup=main_menu()); return
 
-    selected = results[index]
+    if mode == "music":
+        now = time.monotonic()
+        if now-last_search_time.get(update.effective_user.id,0) < SEARCH_COOLDOWN_SECONDS:
+            await update.message.reply_text("⏳ چند ثانیه صبر کن."); return
+        last_search_time[update.effective_user.id] = now
+        m = await update.message.reply_text("🔍 در حال جستجو...")
+        results = await search_music(text)
+        if not results:
+            await m.edit_text("❌ نتیجه‌ای پیدا نشد."); return
+        context.user_data["results"] = results
+        keys = []
+        for i,x in enumerate(results):
+            t = x["title"].replace("\n"," ")
+            if len(t)>38: t=t[:35]+"..."
+            dur=duration_text(x.get("duration"))
+            keys.append([InlineKeyboardButton(
+                f"{i+1}. {t}" + (f" · {dur}" if dur else ""),
+                callback_data=f"music_pick_{i}")])
+        keys.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_home")])
+        await m.edit_text("🎵 یکی از نتایج را انتخاب کن:", reply_markup=InlineKeyboardMarkup(keys))
 
-    await send_downloaded_audio(
-        update,
-        context,
-        selected,
-    )
+    elif mode == "text":
+        context.user_data["pending_text"] = text[:500]
+        await update.message.reply_text("🎨 رنگ را انتخاب کن:", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚪ سفید", callback_data="color_white"),
+             InlineKeyboardButton("⚫ مشکی", callback_data="color_black")],
+            [InlineKeyboardButton("🟡 طلایی", callback_data="color_gold"),
+             InlineKeyboardButton("🔴 قرمز", callback_data="color_red")],
+            [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_home")],
+        ]))
 
+    elif mode == "voice":
+        m = await update.message.reply_text("🎙️ در حال ساخت صدا...")
+        try:
+            audio = await asyncio.to_thread(make_voice, text[:2500])
+            await context.bot.send_audio(update.effective_chat.id, audio,
+                                         filename="delgraphyha_voice.mp3")
+            await m.edit_text("✅ صدا آماده شد.", reply_markup=back_menu())
+        except Exception as e:
+            await m.edit_text(f"❌ {e}", reply_markup=back_menu())
 
-# ----------------------------
-# Main
-# ----------------------------
+async def help_cmd(update, context):
+    if not await require_member(update, context): return
+    await update.effective_message.reply_text(
+        "🎵 /music جستجو و دریافت موزیک\n"
+        "✍️ /text ساخت PNG فارسی شفاف\n"
+        "🎙️ /voice تبدیل متن به صدا\n"
+        "🏠 /start منوی اصلی")
 
 def main():
-    global application, background_loop
-
     if not TOKEN:
-        print("❌ TELEGRAM_TOKEN is not set!")
-        return
-
+        raise SystemExit("❌ TELEGRAM_TOKEN در .env پیدا نشد.")
     setup_cookies()
-
-    application = ApplicationBuilder().token(TOKEN).build()
-
-    application.add_handler(
-        CommandHandler("start", start_handler)
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            check_sub_callback,
-            pattern=r"^check_sub$"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            music_pick_callback,
-            pattern=r"^music_pick_\d+$"
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            message_handler
-        )
-    )
-
-    # یک event loop دائمی برای Telegram
-    background_loop = asyncio.new_event_loop()
-
-    thread = threading.Thread(
-        target=start_background_loop,
-        args=(background_loop,),
-        daemon=True,
-    )
-    thread.start()
-
-    async def init_bot():
-        await application.initialize()
-        await application.start()
-
-        if RENDER_EXTERNAL_URL:
-            webhook_url = (
-                f"{RENDER_EXTERNAL_URL.rstrip('/')}/{TOKEN}"
-            )
-
-            await application.bot.set_webhook(
-                webhook_url,
-                allowed_updates=Update.ALL_TYPES,
-            )
-
-            print(f"✅ Webhook set to: {webhook_url}")
-        else:
-            print(
-                "⚠️ RENDER_EXTERNAL_URL is not set. "
-                "Webhook was not configured."
-            )
-
-    future = asyncio.run_coroutine_threadsafe(
-        init_bot(),
-        background_loop,
-    )
-
-    future.result()
-
-    port = int(os.environ.get("PORT", 10000))
-
-    print(f"🚀 Bot server starting on port {port}")
-
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        threaded=True,
-    )
-
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("music", lambda u,c: command_mode(u,c,"music")))
+    app.add_handler(CommandHandler("text", lambda u,c: command_mode(u,c,"text")))
+    app.add_handler(CommandHandler("voice", lambda u,c: command_mode(u,c,"voice")))
+    app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
+    print("🚀 Delgraphyha Studio is running...")
+    print(f"📢 Required channel: {CHANNEL_USERNAME}")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
