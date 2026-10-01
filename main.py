@@ -51,6 +51,23 @@ TEXT_STYLES = {
     "bold": "🔠 بولد",
 }
 
+
+def youtube_cookie_file():
+    """Return a cookie file path for yt-dlp without storing secrets in GitHub."""
+    env_cookies = os.getenv("YOUTUBE_COOKIES", "").strip()
+    if env_cookies:
+        runtime_cookie = Path("youtube_cookies_runtime.txt")
+        # Render env vars may contain literal \\n instead of real newlines.
+        content = env_cookies.replace("\\r\\n", "\n").replace("\\n", "\n")
+        runtime_cookie.write_text(content, encoding="utf-8")
+        return str(runtime_cookie)
+
+    local_cookie = Path("cookies.txt")
+    if local_cookie.exists():
+        return str(local_cookie)
+
+    return None
+
 def font_path(style="modern"):
     env_font = os.getenv("PERSIAN_FONT")
     base = Path(__file__).resolve().parent
