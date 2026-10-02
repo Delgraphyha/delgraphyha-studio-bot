@@ -1,0 +1,8 @@
+.git
+.env
+cookies.txt
+downloads
+Downloads
+__pycache__
+*.pyc
+youtube_cookies_runtime.txt
