@@ -1,3 +1,4 @@
+from flask import Flask
 import os
 import re
 import time
@@ -499,5 +500,21 @@ def main():
     print(f"📢 Required channel: {CHANNEL_USERNAME}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
+
+health_app = Flask(__name__)
+
+@health_app.get("/")
+def health():
+    return "Delgraphyha Studio Bot is running", 200
+
+@health_app.get("/health")
+def health_check():
+    return {"status": "ok"}, 200
+
+def run_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    health_app.run(host="0.0.0.0", port=port, use_reloader=False)
+
 if __name__ == "__main__":
+    threading.Thread(target=run_health_server, daemon=True).start()
     main()
