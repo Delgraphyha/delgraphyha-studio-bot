@@ -285,20 +285,38 @@ def download_audio(url, user_id):
         "format": "bestaudio/best",
         "outtmpl": str(d / "track.%(ext)s"),
         "ignoreerrors": False,
+
+        # Temporary Render diagnostics. These messages go only to Render Logs.
+        # Cookie contents are never printed.
+        "quiet": False,
+        "no_warnings": False,
+        "verbose": True,
+
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "128",
         }],
     })
+
+    print("\n===== DELGRAPHYHA YT-DLP DIAGNOSTIC START =====")
+    print("URL:", url)
+    print("Cookies:", "loaded" if COOKIES_FILE and Path(COOKIES_FILE).exists() else "missing")
+    print("FFmpeg:", shutil.which("ffmpeg") or "missing")
+
     try:
         with yt_dlp.YoutubeDL(o) as y:
             info = y.extract_info(url, download=True)
         files = list(d.glob("*.mp3"))
         if not files:
             raise RuntimeError("فایل MP3 ساخته نشد.")
+        print("Diagnostic result: SUCCESS")
+        print("===== DELGRAPHYHA YT-DLP DIAGNOSTIC END =====\n")
         return files[0], (info or {}).get("title") or "Music", d
-    except Exception:
+    except Exception as e:
+        print("Diagnostic result: FAILED")
+        print("Exception:", repr(e))
+        print("===== DELGRAPHYHA YT-DLP DIAGNOSTIC END =====\n")
         shutil.rmtree(d, ignore_errors=True)
         raise
 
