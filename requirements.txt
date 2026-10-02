@@ -7,4 +7,4 @@ Pillow
 arabic-reshaper
 python-bidi
 requests
-bgutil-ytdlp-pot-provider>=2.0.1
+bgutil-ytdlp-pot-provider==2.0.1
