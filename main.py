@@ -169,7 +169,7 @@ def ydl_base():
         "js_runtimes": {"node": {"path": "/usr/local/bin/node"}},
         "remote_components": {"ejs:npm"},
         "extractor_args": {
-            "youtube": {"player_client": ["mweb", "tv", "web_safari"]},
+            "youtube": {"player_client": ["mweb"]},
             "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
         },
         "ignoreerrors": True, "socket_timeout": 30,
