@@ -7,6 +7,7 @@ import uuid
 import shutil
 import asyncio
 import unicodedata
+import json
 from difflib import SequenceMatcher
 from pathlib import Path
 from io import BytesIO
@@ -38,6 +39,12 @@ SEARCH_RESULTS_PER_SOURCE = 8
 SEARCH_COOLDOWN_SECONDS = 5
 last_search_time = {}
 COOKIES_FILE = None
+
+LIBRARY_FILE = Path("music_library.json")
+LIBRARY_CHANNELS = {
+    "@delgraphyha": "Delgraphyha",
+    "@ahangzibamusic": "Ahang Ziba",
+}
 
 COLORS = {
     "white": (255, 255, 255, 255),
@@ -190,6 +197,128 @@ def duration_text(v):
     m, s = divmod(v, 60)
     h, m = divmod(m, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+def clean_music_text(s):
+    s = unicodedata.normalize("NFKC", (s or "").lower())
+    s = re.sub(r"[@#_\-–—|]+", " ", s)
+    return " ".join(re.sub(r"[^\w\s\u0600-\u06ff]", " ", s).split())
+
+def load_music_library():
+    if not LIBRARY_FILE.exists():
+        return []
+    try:
+        data = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print("Library load:", repr(e))
+        return []
+
+def save_music_library(items):
+    LIBRARY_FILE.write_text(
+        json.dumps(items, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+def upsert_library_track(track):
+    items = load_music_library()
+    key = (str(track.get("chat_id")), str(track.get("message_id")))
+    replaced = False
+    for i, old in enumerate(items):
+        if (str(old.get("chat_id")), str(old.get("message_id"))) == key:
+            items[i] = track
+            replaced = True
+            break
+    if not replaced:
+        items.append(track)
+    save_music_library(items)
+    return len(items)
+
+def library_score(query, track):
+    q = clean_music_text(query)
+    title = clean_music_text(track.get("title"))
+    performer = clean_music_text(track.get("performer"))
+    caption = clean_music_text(track.get("caption"))
+    channel = clean_music_text(track.get("channel"))
+    hay = " ".join(x for x in [title, performer, caption, channel] if x)
+    if not q or not hay:
+        return 0
+    qw = set(q.split())
+    hw = set(hay.split())
+    s = SequenceMatcher(None, q, hay).ratio() * 45
+    s += SequenceMatcher(None, q, title).ratio() * 35
+    if q in hay:
+        s += 45
+    if qw:
+        s += len(qw & hw) / len(qw) * 55
+    # Brand words should strongly favor our own library.
+    if "delgraphyha" in q and "delgraphyha" in hay:
+        s += 60
+    if any(w in q for w in ("ahangzibamusic", "ahang", "ziba")) and track.get("channel_username") == "@ahangzibamusic":
+        s += 35
+    return s
+
+def search_library(query, limit=8):
+    scored = []
+    for track in load_music_library():
+        s = library_score(query, track)
+        if s >= 45:
+            x = dict(track)
+            x["score"] = s
+            x["source"] = "Library"
+            scored.append(x)
+    return sorted(scored, key=lambda x: x["score"], reverse=True)[:limit]
+
+def audio_track_from_message(msg, channel_username=None):
+    audio = getattr(msg, "audio", None)
+    doc = getattr(msg, "document", None)
+    if not audio and not (doc and (doc.mime_type or "").startswith("audio/")):
+        return None
+    media = audio or doc
+    title = getattr(audio, "title", None) or getattr(doc, "file_name", None) or "Music"
+    performer = getattr(audio, "performer", None) or ""
+    caption = msg.caption or ""
+    username = channel_username or (f"@{msg.chat.username.lower()}" if msg.chat.username else "")
+    return {
+        "title": title,
+        "performer": performer,
+        "caption": caption,
+        "duration": getattr(media, "duration", None),
+        "file_id": media.file_id,
+        "file_unique_id": media.file_unique_id,
+        "chat_id": msg.chat_id,
+        "message_id": msg.message_id,
+        "channel_username": username.lower(),
+        "channel": LIBRARY_CHANNELS.get(username.lower(), username or "Delgraphyha Library"),
+    }
+
+async def capture_channel_audio(update, context):
+    msg = update.channel_post
+    if not msg:
+        return
+    username = f"@{msg.chat.username.lower()}" if msg.chat.username else ""
+    if username not in LIBRARY_CHANNELS:
+        return
+    track = audio_track_from_message(msg, username)
+    if not track:
+        return
+    count = await asyncio.to_thread(upsert_library_track, track)
+    print(f"Library: saved {track['title']} from {username}; total={count}")
+
+async def import_forwarded_audio(update, context):
+    """Import an old channel audio by forwarding it to the bot in a private chat."""
+    msg = update.message
+    if not msg:
+        return
+    origin = getattr(msg, "forward_origin", None)
+    origin_chat = getattr(origin, "chat", None)
+    username = f"@{origin_chat.username.lower()}" if origin_chat and origin_chat.username else ""
+    if username not in LIBRARY_CHANNELS:
+        return
+    track = audio_track_from_message(msg, username)
+    if not track:
+        return
+    count = await asyncio.to_thread(upsert_library_track, track)
+    await msg.reply_text(f"✅ به کتابخانه اضافه شد: {track['title']}\n📚 تعداد ثبت‌شده: {count}")
 
 def normalize_entry(e, source):
     if not e:
@@ -416,6 +545,21 @@ async def callback(update, context):
             return
         work = None
         try:
+            if x.get("source") == "Library":
+                caption = f"🎵 {x.get('title','Music')}"
+                if x.get("performer"):
+                    caption += f"\n🎤 {x['performer']}"
+                caption += f"\n📚 {x.get('channel','Delgraphyha')}"
+                await context.bot.send_audio(
+                    q.message.chat_id,
+                    audio=x["file_id"],
+                    title=x.get("title") or "Music",
+                    performer=x.get("performer") or None,
+                    caption=caption,
+                )
+                await q.edit_message_text("✅ موزیک از کتابخانه ارسال شد.", reply_markup=back_menu())
+                return
+
             results = context.user_data.get("results") or []
             # Start with the selected result, then try the remaining ranked
             # SoundCloud results if a candidate cannot be downloaded (e.g. DRM).
@@ -507,7 +651,11 @@ async def text_message(update, context):
             await update.message.reply_text("⏳ چند ثانیه صبر کن."); return
         last_search_time[update.effective_user.id] = now
         m = await update.message.reply_text("🔍 در حال جستجو...")
-        results = await search_music(text)
+        results = await asyncio.to_thread(search_library, text)
+        if results:
+            await m.edit_text("📚 در کتابخانه Delgraphyha پیدا شد...")
+        else:
+            results = await search_music(text)
         if not results:
             await m.edit_text("❌ نتیجه‌ای پیدا نشد."); return
         context.user_data["results"] = results
@@ -561,6 +709,11 @@ def main():
     app.add_handler(CommandHandler("text", lambda u,c: command_mode(u,c,"text")))
     app.add_handler(CommandHandler("voice", lambda u,c: command_mode(u,c,"voice")))
     app.add_handler(CallbackQueryHandler(callback))
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, capture_channel_audio))
+    app.add_handler(MessageHandler(
+        (filters.AUDIO | filters.Document.AUDIO) & filters.FORWARDED,
+        import_forwarded_audio
+    ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     print("🚀 Delgraphyha Studio is running...")
     print(f"📢 Required channel: {CHANNEL_USERNAME}")
