@@ -40,11 +40,12 @@ SEARCH_COOLDOWN_SECONDS = 5
 last_search_time = {}
 COOKIES_FILE = None
 
-LIBRARY_FILE = Path("music_library.json")
+LIBRARY_FILE = Path("music_library.json")  # local cache only
 LIBRARY_CHANNELS = {
     "@delgraphyha": "Delgraphyha",
     "@ahangzibamusic": "Ahang Ziba",
 }
+LIBRARY_INDEX_CHAT_ID = os.getenv("LIBRARY_INDEX_CHAT_ID", "").strip()
 
 COLORS = {
     "white": (255, 255, 255, 255),
@@ -290,6 +291,38 @@ def audio_track_from_message(msg, channel_username=None):
         "channel_username": username.lower(),
         "channel": LIBRARY_CHANNELS.get(username.lower(), username or "Delgraphyha Library"),
     }
+
+async def export_library_cmd(update, context):
+    if not await require_member(update, context):
+        return
+    items = await asyncio.to_thread(load_music_library)
+    if not items:
+        await update.effective_message.reply_text("📚 کتابخانه خالی است.")
+        return
+    data = json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")
+    bio = BytesIO(data)
+    bio.name = "music_library.json"
+    await update.effective_message.reply_document(
+        document=bio,
+        filename="music_library.json",
+        caption=f"💾 بکاپ کتابخانه موزیک | {len(items)} آهنگ"
+    )
+
+async def import_library_backup(update, context):
+    msg = update.message
+    if not msg or not msg.document or msg.document.file_name != "music_library.json":
+        return
+    try:
+        tgfile = await msg.document.get_file()
+        data = await tgfile.download_as_bytearray()
+        items = json.loads(bytes(data).decode("utf-8"))
+        if not isinstance(items, list):
+            raise ValueError("invalid library")
+        await asyncio.to_thread(save_music_library, items)
+        await msg.reply_text(f"✅ بکاپ کتابخانه بازیابی شد: {len(items)} آهنگ")
+    except Exception as e:
+        print("Library restore:", repr(e))
+        await msg.reply_text("❌ فایل بکاپ کتابخانه معتبر نیست.")
 
 async def capture_channel_audio(update, context):
     msg = update.channel_post
@@ -708,11 +741,16 @@ def main():
     app.add_handler(CommandHandler("music", lambda u,c: command_mode(u,c,"music")))
     app.add_handler(CommandHandler("text", lambda u,c: command_mode(u,c,"text")))
     app.add_handler(CommandHandler("voice", lambda u,c: command_mode(u,c,"voice")))
+    app.add_handler(CommandHandler("librarybackup", export_library_cmd))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, capture_channel_audio))
     app.add_handler(MessageHandler(
         (filters.AUDIO | filters.Document.AUDIO) & filters.FORWARDED,
         import_forwarded_audio
+    ))
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("json"),
+        import_library_backup
     ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     print("🚀 Delgraphyha Studio is running...")
