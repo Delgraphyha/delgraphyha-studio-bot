@@ -166,6 +166,8 @@ def setup_cookies():
 def ydl_base():
     o = {
         "quiet": True, "no_warnings": True, "noplaylist": True,
+        "js_runtimes": {"node": {"path": "/usr/local/bin/node"}},
+        "remote_components": {"ejs:npm"},
         "extractor_args": {
             "youtube": {"player_client": ["mweb", "tv", "web_safari"]},
             "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
