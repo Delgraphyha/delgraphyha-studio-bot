@@ -270,9 +270,9 @@ async def search_music(q):
         if x["source"] == "YouTube": s += 5
         return s
 
-    items = await asyncio.to_thread(search_source, q, "ytsearch", "YouTube")
-    if len(items) < 6:
-        items += await asyncio.to_thread(search_source, q, "scsearch", "SoundCloud")
+    # General/public music search uses SoundCloud only.
+    # Delgraphyha and @ahangzibamusic will later be resolved from our own library first.
+    items = await asyncio.to_thread(search_source, q, "scsearch", "SoundCloud")
     out, seen = [], set()
     for x in items:
         if x["url"] in seen: continue
@@ -419,12 +419,17 @@ async def callback(update, context):
             results = context.user_data.get("results") or []
             # Start with the selected result, then try the remaining ranked
             # SoundCloud results if a candidate cannot be downloaded (e.g. DRM).
-            candidates = [x]
-            seen_urls = {x.get("url")}
+            candidates = []
+            seen_urls = set()
+            if x.get("source") == "SoundCloud":
+                candidates.append(x)
+                seen_urls.add(x.get("url"))
             for alt in results:
                 if alt.get("source") == "SoundCloud" and alt.get("url") not in seen_urls:
                     candidates.append(alt)
                     seen_urls.add(alt.get("url"))
+            if not candidates:
+                raise RuntimeError("هیچ نتیجه SoundCloud برای این جستجو پیدا نشد.")
 
             last_error = None
             for pos, candidate in enumerate(candidates, 1):
