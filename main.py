@@ -416,17 +416,53 @@ async def callback(update, context):
             return
         work = None
         try:
-            await q.edit_message_text(f"⬇️ در حال دریافت:\n{x['title']}")
-            path, title, work = await asyncio.to_thread(download_audio, x["url"], q.from_user.id)
-            with open(path, "rb") as f:
-                await context.bot.send_audio(q.message.chat_id, f, title=title,
-                    caption=f"🎵 {title}\n🤖 Delgraphyha Studio")
-            await q.edit_message_text("✅ موزیک ارسال شد.", reply_markup=back_menu())
+            results = context.user_data.get("results") or []
+            # Start with the selected result, then try the remaining ranked
+            # SoundCloud results if a candidate cannot be downloaded (e.g. DRM).
+            candidates = [x]
+            seen_urls = {x.get("url")}
+            for alt in results:
+                if alt.get("source") == "SoundCloud" and alt.get("url") not in seen_urls:
+                    candidates.append(alt)
+                    seen_urls.add(alt.get("url"))
+
+            last_error = None
+            for pos, candidate in enumerate(candidates, 1):
+                try:
+                    if pos == 1:
+                        msg = f"⬇️ در حال دریافت:\n{candidate['title']}"
+                    else:
+                        msg = f"🔄 نتیجه قبلی قابل دریافت نبود؛ امتحان نتیجه بعدی:\n{candidate['title']}"
+                    await q.edit_message_text(msg)
+
+                    path, title, work = await asyncio.to_thread(
+                        download_audio, candidate["url"], q.from_user.id
+                    )
+                    with open(path, "rb") as f:
+                        await context.bot.send_audio(
+                            q.message.chat_id, f, title=title,
+                            caption=f"🎵 {title}\n🤖 Delgraphyha Studio"
+                        )
+                    await q.edit_message_text("✅ موزیک ارسال شد.", reply_markup=back_menu())
+                    return
+                except Exception as e:
+                    last_error = e
+                    print(f"Download candidate {pos}/{len(candidates)}:", repr(e))
+                    if work:
+                        shutil.rmtree(work, ignore_errors=True)
+                        work = None
+                    continue
+
+            raise last_error or RuntimeError("هیچ نتیجه قابل دانلودی پیدا نشد.")
         except Exception as e:
             print("Download:", repr(e))
-            await q.edit_message_text(f"❌ دانلود انجام نشد.\n{str(e)[:180]}", reply_markup=back_menu())
+            await q.edit_message_text(
+                f"❌ هیچ نتیجه قابل دانلودی پیدا نشد.\n{str(e)[:160]}",
+                reply_markup=back_menu()
+            )
         finally:
-            if work: shutil.rmtree(work, ignore_errors=True)
+            if work:
+                shutil.rmtree(work, ignore_errors=True)
         return
 
     if q.data.startswith("style_"):
