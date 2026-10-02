@@ -166,6 +166,11 @@ def setup_cookies():
 def ydl_base():
     o = {
         "quiet": True, "no_warnings": True, "noplaylist": True,
+        # Use YouTube mweb client with the local bgutil PO-token provider.
+        "extractor_args": {
+            "youtube": {"player_client": ["mweb"]},
+            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
+        },
         "ignoreerrors": True, "socket_timeout": 30,
         "retries": 3, "fragment_retries": 3,
     }
@@ -530,10 +535,39 @@ def health():
 def health_check():
     return {"status": "ok"}, 200
 
+def start_pot_provider():
+    """Start the local bgutil PO-token provider bundled in the same Render service."""
+    import subprocess
+    import time
+
+    server_js = Path("/app/bgutil-provider/server/build/main.js")
+    if not server_js.exists():
+        # Render normally uses /opt/render/project/src; support that and local testing too.
+        server_js = Path(__file__).resolve().parent / "bgutil-provider" / "server" / "build" / "main.js"
+
+    if not server_js.exists():
+        print("⚠️ PO Token provider build not found:", server_js)
+        return None
+
+    try:
+        proc = subprocess.Popen(
+            ["node", str(server_js), "--host", "127.0.0.1", "--port", "4416"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+        )
+        time.sleep(2)
+        print("🔐 PO Token provider started on 127.0.0.1:4416")
+        return proc
+    except Exception as e:
+        print("⚠️ PO Token provider failed to start:", repr(e))
+        return None
+
+
 def run_health_server():
     port = int(os.getenv("PORT", "10000"))
     health_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 if __name__ == "__main__":
+    pot_provider_process = start_pot_provider()
     threading.Thread(target=run_health_server, daemon=True).start()
     main()
