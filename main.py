@@ -168,7 +168,7 @@ def ydl_base():
         "quiet": True, "no_warnings": True, "noplaylist": True,
         # Use YouTube mweb client with the local bgutil PO-token provider.
         "extractor_args": {
-            "youtube": {"player_client": ["mweb"]},
+            "youtube": {"player_client": ["mweb", "tv", "web_safari"]},
             "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
         },
         "ignoreerrors": True, "socket_timeout": 30,

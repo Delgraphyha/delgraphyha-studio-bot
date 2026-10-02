@@ -1,10 +1,10 @@
 python-telegram-bot[webhooks]
 Flask
-yt-dlp
+yt-dlp>=2025.05.22
 ffmpeg-python
 python-dotenv
 Pillow
 arabic-reshaper
 python-bidi
 requests
-bgutil-ytdlp-pot-provider
+bgutil-ytdlp-pot-provider>=2.0.1
