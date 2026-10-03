@@ -135,6 +135,15 @@ def sub_menu():
         [InlineKeyboardButton("✅ عضو شدم، بررسی کن", callback_data="check_sub")],
     ])
 
+async def menu_home(update, context):
+    query = update.callback_query
+    await query.answer()
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="🏠 به صفحه اصلی برگشتید\n\n🎬 Delgraphyha Studio | دلگرافیها\n\nابزار را انتخاب کنید:",
+        reply_markup=main_menu(),
+    )
+
 async def is_member(user_id, context):
     try:
         m = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
@@ -869,6 +878,7 @@ def main():
     app.add_handler(CommandHandler("voice", lambda u,c: command_mode(u,c,"voice")))
     app.add_handler(CommandHandler("librarybackup", export_library_cmd))
     app.add_handler(CommandHandler("channelstatus", channel_status_cmd))
+    app.add_handler(CallbackQueryHandler(menu_home, pattern=r"^menu_home$"))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, capture_channel_audio))
     app.add_handler(MessageHandler(
