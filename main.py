@@ -490,7 +490,7 @@ def download_audio(url, user_id):
 
 
 def make_png(text, color, style="modern"):
-    fp = font_path()
+    fp = font_path(style)
     if not fp:
         raise RuntimeError("فونت فارسی پیدا نشد.")
     shaped = "\n".join(get_display(arabic_reshaper.reshape(x)) for x in text.splitlines())
@@ -663,7 +663,12 @@ async def callback(update, context):
         if not text:
             await q.edit_message_text("❌ متن منقضی شده.", reply_markup=back_menu()); return
         try:
-            img = await asyncio.to_thread(make_png, text, q.data[6:])
+            img = await asyncio.to_thread(
+                make_png,
+                text,
+                q.data[6:],
+                context.user_data.get("text_style", "modern")
+            )
             await context.bot.send_document(q.message.chat_id, img,
                 filename="delgraphyha_text.png",
                 caption="✍️ PNG شفاف | Delgraphyha Studio")
