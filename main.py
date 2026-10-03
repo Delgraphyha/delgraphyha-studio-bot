@@ -817,12 +817,44 @@ async def text_message(update, context):
         except Exception as e:
             await m.edit_text(f"❌ {e}", reply_markup=back_menu())
 
+async def channel_status_cmd(update, context):
+    """Show Delgraphyha channel status directly from Telegram Bot API."""
+    if not await require_member(update, context):
+        return
+    try:
+        chat = await context.bot.get_chat(CHANNEL_USERNAME)
+        count = await context.bot.get_chat_member_count(CHANNEL_USERNAME)
+        bot_member = await context.bot.get_chat_member(CHANNEL_USERNAME, context.bot.id)
+
+        chat_type = getattr(chat, "type", "unknown")
+        username = getattr(chat, "username", None) or CHANNEL_USERNAME.lstrip("@")
+        title = getattr(chat, "title", None) or "Delgraphyha"
+        bot_status = getattr(bot_member, "status", "unknown")
+
+        text = (
+            "📊 وضعیت کانال از Telegram API\n\n"
+            f"📢 کانال: {title}\n"
+            f"🔗 @{username}\n"
+            f"👥 تعداد واقعی اعضا: {count}\n"
+            f"📌 نوع چت: {chat_type}\n"
+            f"🤖 وضعیت ربات: {bot_status}\n\n"
+            "🕒 این عدد مستقیماً در همین لحظه از Telegram گرفته شده است."
+        )
+        await update.effective_message.reply_text(text, reply_markup=back_menu())
+    except Exception as e:
+        print("Channel status:", repr(e))
+        await update.effective_message.reply_text(
+            f"❌ دریافت وضعیت کانال ممکن نشد:\n{str(e)[:200]}",
+            reply_markup=back_menu()
+        )
+
 async def help_cmd(update, context):
     if not await require_member(update, context): return
     await update.effective_message.reply_text(
         "🎵 /music جستجو و دریافت موزیک\n"
         "✍️ /text ساخت PNG فارسی شفاف\n"
         "🎙️ /voice تبدیل متن به صدا\n"
+        "📊 /channelstatus وضعیت کانال Delgraphyha\\n"
         "🏠 /start منوی اصلی")
 
 def main():
@@ -836,6 +868,7 @@ def main():
     app.add_handler(CommandHandler("text", lambda u,c: command_mode(u,c,"text")))
     app.add_handler(CommandHandler("voice", lambda u,c: command_mode(u,c,"voice")))
     app.add_handler(CommandHandler("librarybackup", export_library_cmd))
+    app.add_handler(CommandHandler("channelstatus", channel_status_cmd))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, capture_channel_audio))
     app.add_handler(MessageHandler(
