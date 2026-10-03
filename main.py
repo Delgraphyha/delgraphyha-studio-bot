@@ -88,7 +88,7 @@ def font_path(style="modern"):
             env_font,
             "C:/Windows/Fonts/tahoma.ttf",
         ],
-        "hand": [
+        "handwriting": [
             os.getenv("PERSIAN_FONT_HAND"),
             str(base / "fonts" / "handwriting.ttf"),
             env_font,
@@ -487,57 +487,93 @@ def download_audio(url, user_id):
         raise
 
 
-def make_png(text, color, style="modern"):
+def _text_width(draw, text, font):
+    b = draw.textbbox((0, 0), text or " ", font=font, direction="rtl",
+                      language="fa", stroke_width=2)
+    return max(1, b[2] - b[0])
+
+def _wrap_rtl_text(text, font, max_width=1400):
+    """Wrap Persian text by rendered width, preserving paragraphs and words."""
+    probe = ImageDraw.Draw(Image.new("RGBA", (10, 10), (0, 0, 0, 0)))
+    lines = []
+    paragraphs = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            lines.append("")
+            continue
+        words = para.split()
+        current = ""
+        for word in words:
+            candidate = word if not current else current + " " + word
+            if _text_width(probe, candidate, font) <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                # Extremely long single token: keep it intact rather than
+                # cutting Persian letters in the middle.
+                current = word
+        if current:
+            lines.append(current)
+    return lines or [""]
+
+def make_png_pages(text, color, style="modern"):
+    """Return one or more transparent PNGs for short or long Persian text."""
     fp = font_path(style)
     if not fp:
         raise RuntimeError("فونت فارسی پیدا نشد.")
 
-    font = ImageFont.truetype(fp, 96)
-    lines = text.splitlines() or [text]
+    # Distinct sizing helps each typeface keep its intended character.
+    sizes = {"nastaliq": 108, "handwriting": 100, "modern": 94, "bold": 96}
+    font = ImageFont.truetype(fp, sizes.get(style, 96))
 
-    # Pillow in the Docker image uses RAQM/FriBidi. Give it the ORIGINAL
-    # Persian text and explicitly request RTL. Do not reverse/re-shape first,
-    # otherwise the bidi algorithm is applied twice and word order flips.
-    tmp = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
-    d = ImageDraw.Draw(tmp)
+    max_text_width = 1400
+    max_lines_per_page = 7
+    spacing = 28 if style == "nastaliq" else 22
+    pad_x, pad_y = 70, 60
 
-    line_boxes = [
-        d.textbbox((0, 0), line, font=font, direction="rtl",
-                   language="fa", stroke_width=2)
-        for line in lines
-    ]
-    line_heights = [max(1, b[3] - b[1]) for b in line_boxes]
-    max_width = max(max(1, b[2] - b[0]) for b in line_boxes)
+    lines = _wrap_rtl_text(text, font, max_text_width=max_text_width)
+    chunks = [lines[i:i + max_lines_per_page]
+              for i in range(0, len(lines), max_lines_per_page)]
 
-    pad = 50
-    spacing = 22
-    w = int(max(100, max_width + 2 * pad))
-    h = int(max(100, sum(line_heights) + spacing * max(0, len(lines)-1) + 2 * pad))
+    pages = []
+    for page_no, page_lines in enumerate(chunks, 1):
+        tmp = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+        d = ImageDraw.Draw(tmp)
+        boxes = [
+            d.textbbox((0, 0), line or " ", font=font, direction="rtl",
+                       language="fa", stroke_width=2)
+            for line in page_lines
+        ]
+        widths = [max(1, b[2]-b[0]) for b in boxes]
+        heights = [max(1, b[3]-b[1]) for b in boxes]
+        w = int(max(300, min(max_text_width, max(widths)) + 2*pad_x))
+        h = int(max(160, sum(heights) + spacing*max(0,len(page_lines)-1) + 2*pad_y))
 
-    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
+        im = Image.new("RGBA", (w, h), (0,0,0,0))
+        d = ImageDraw.Draw(im)
+        y = pad_y
+        for line, box, lh in zip(page_lines, boxes, heights):
+            d.text(
+                (w/2, y-box[1]), line or " ",
+                font=font, fill=COLORS[color], anchor="ma",
+                direction="rtl", language="fa",
+                stroke_width=2,
+                stroke_fill=(0,0,0,80) if color=="white" else (255,255,255,60),
+            )
+            y += lh + spacing
 
-    y = pad
-    for line, box, lh in zip(lines, line_boxes, line_heights):
-        # Center each RTL line while RAQM handles Persian shaping/order.
-        d.text(
-            (w / 2, y - box[1]),
-            line,
-            font=font,
-            fill=COLORS[color],
-            anchor="ma",
-            direction="rtl",
-            language="fa",
-            stroke_width=2,
-            stroke_fill=(0,0,0,80) if color=="white" else (255,255,255,60),
-        )
-        y += lh + spacing
+        bio = BytesIO()
+        im.save(bio, "PNG")
+        bio.seek(0)
+        bio.name = f"delgraphyha_text_{page_no:02d}.png"
+        pages.append(bio)
+    return pages
 
-    bio = BytesIO()
-    im.save(bio, "PNG")
-    bio.seek(0)
-    bio.name = "delgraphyha_text.png"
-    return bio
+def make_png(text, color, style="modern"):
+    # Backward-compatible helper for any older call site.
+    return make_png_pages(text, color, style)[0]
 
 def make_voice(text):
     if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
@@ -701,16 +737,27 @@ async def callback(update, context):
         if not text:
             await q.edit_message_text("❌ متن منقضی شده.", reply_markup=back_menu()); return
         try:
-            img = await asyncio.to_thread(
-                make_png,
+            pages = await asyncio.to_thread(
+                make_png_pages,
                 text,
                 q.data[6:],
                 context.user_data.get("text_style", "modern")
             )
-            await context.bot.send_document(q.message.chat_id, img,
-                filename="delgraphyha_text.png",
-                caption="✍️ PNG شفاف | Delgraphyha Studio")
-            await q.edit_message_text("✅ نوشته آماده شد.", reply_markup=back_menu())
+            total = len(pages)
+            for i, img in enumerate(pages, 1):
+                caption = "✍️ PNG شفاف | Delgraphyha Studio"
+                if total > 1:
+                    caption += f"\n📄 صفحه {i} از {total}"
+                await context.bot.send_document(
+                    q.message.chat_id,
+                    img,
+                    filename=img.name,
+                    caption=caption
+                )
+            await q.edit_message_text(
+                f"✅ نوشته آماده شد." + (f" {total} صفحه ساخته شد." if total > 1 else ""),
+                reply_markup=back_menu()
+            )
         except Exception as e:
             await q.edit_message_text(f"❌ {e}", reply_markup=back_menu())
 
@@ -747,7 +794,7 @@ async def text_message(update, context):
         await m.edit_text("🎵 یکی از نتایج را انتخاب کن:", reply_markup=InlineKeyboardMarkup(keys))
 
     elif mode == "text":
-        context.user_data["pending_text"] = text[:500]
+        context.user_data["pending_text"] = text
         context.user_data.pop("text_style", None)
         await update.message.reply_text(
             "✍️ نوع خط را انتخاب کن:",
