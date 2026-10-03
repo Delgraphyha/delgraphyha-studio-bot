@@ -8,3 +8,4 @@ arabic-reshaper
 python-bidi
 requests
 bgutil-ytdlp-pot-provider==2.0.1
+
