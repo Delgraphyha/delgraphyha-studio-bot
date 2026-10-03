@@ -601,7 +601,7 @@ async def callback(update, context):
         mode = q.data[5:]
         context.user_data["mode"] = mode
         p = {"music":"🎵 نام آهنگ، خواننده یا لینک را بفرست.",
-             "text":"✍️ متن فارسی را بفرست، بعد رنگ را انتخاب می‌کنی.",
+             "text":"✍️ متن فارسی را بفرست؛ بعد نوع خط و رنگ را انتخاب می‌کنی.",
              "voice":"🎙️ متن فارسی Voice-over را بفرست."}
         await q.edit_message_text(p[mode], reply_markup=back_menu())
         return
@@ -691,6 +691,7 @@ async def callback(update, context):
              InlineKeyboardButton("⚫ مشکی", callback_data="color_black")],
             [InlineKeyboardButton("🟡 طلایی", callback_data="color_gold"),
              InlineKeyboardButton("🔴 قرمز", callback_data="color_red")],
+            [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_home")],
         ]
         await q.edit_message_text("رنگ نوشته را انتخاب کن:", reply_markup=InlineKeyboardMarkup(keyboard))
         return
@@ -747,13 +748,17 @@ async def text_message(update, context):
 
     elif mode == "text":
         context.user_data["pending_text"] = text[:500]
-        await update.message.reply_text("🎨 رنگ را انتخاب کن:", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚪ سفید", callback_data="color_white"),
-             InlineKeyboardButton("⚫ مشکی", callback_data="color_black")],
-            [InlineKeyboardButton("🟡 طلایی", callback_data="color_gold"),
-             InlineKeyboardButton("🔴 قرمز", callback_data="color_red")],
-            [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_home")],
-        ]))
+        context.user_data.pop("text_style", None)
+        await update.message.reply_text(
+            "✍️ نوع خط را انتخاب کن:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖋 نستعلیق", callback_data="style_nastaliq"),
+                 InlineKeyboardButton("✍️ دست‌نویس", callback_data="style_handwriting")],
+                [InlineKeyboardButton("🔷 مدرن", callback_data="style_modern"),
+                 InlineKeyboardButton("🔠 بولد", callback_data="style_bold")],
+                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_home")],
+            ])
+        )
 
     elif mode == "voice":
         m = await update.message.reply_text("🎙️ در حال ساخت صدا...")
