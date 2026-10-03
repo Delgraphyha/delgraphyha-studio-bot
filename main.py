@@ -16,8 +16,6 @@ import requests
 import yt_dlp
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont
-import arabic_reshaper
-from bidi.algorithm import get_display
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus
@@ -490,25 +488,51 @@ def download_audio(url, user_id):
 
 
 def make_png(text, color, style="modern"):
-    # Shape Persian/Arabic letters and apply RTL visual order for Pillow.
-    reshaped_text = arabic_reshaper.reshape(text)
-    display_text = get_display(reshaped_text)
     fp = font_path(style)
     if not fp:
         raise RuntimeError("فونت فارسی پیدا نشد.")
-    shaped = "\n".join(get_display(arabic_reshaper.reshape(x)) for x in text.splitlines())
+
     font = ImageFont.truetype(fp, 96)
-    tmp = Image.new("RGBA", (10, 10))
+    lines = text.splitlines() or [text]
+
+    # Pillow in the Docker image uses RAQM/FriBidi. Give it the ORIGINAL
+    # Persian text and explicitly request RTL. Do not reverse/re-shape first,
+    # otherwise the bidi algorithm is applied twice and word order flips.
+    tmp = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
     d = ImageDraw.Draw(tmp)
-    b = d.multiline_textbbox((0,0), shaped, font=font, spacing=22, align="center", stroke_width=2)
+
+    line_boxes = [
+        d.textbbox((0, 0), line, font=font, direction="rtl",
+                   language="fa", stroke_width=2)
+        for line in lines
+    ]
+    line_heights = [max(1, b[3] - b[1]) for b in line_boxes]
+    max_width = max(max(1, b[2] - b[0]) for b in line_boxes)
+
     pad = 50
-    w = int(max(100, b[2] - b[0] + 2 * pad))
-    h = int(max(100, b[3] - b[1] + 2 * pad))
+    spacing = 22
+    w = int(max(100, max_width + 2 * pad))
+    h = int(max(100, sum(line_heights) + spacing * max(0, len(lines)-1) + 2 * pad))
+
     im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    d.multiline_text((w/2,pad-b[1]), shaped, font=font, fill=COLORS[color],
-                     anchor="ma", align="center", spacing=22, stroke_width=2,
-                     stroke_fill=(0,0,0,80) if color=="white" else (255,255,255,60))
+
+    y = pad
+    for line, box, lh in zip(lines, line_boxes, line_heights):
+        # Center each RTL line while RAQM handles Persian shaping/order.
+        d.text(
+            (w / 2, y - box[1]),
+            line,
+            font=font,
+            fill=COLORS[color],
+            anchor="ma",
+            direction="rtl",
+            language="fa",
+            stroke_width=2,
+            stroke_fill=(0,0,0,80) if color=="white" else (255,255,255,60),
+        )
+        y += lh + spacing
+
     bio = BytesIO()
     im.save(bio, "PNG")
     bio.seek(0)
