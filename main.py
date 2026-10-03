@@ -490,6 +490,9 @@ def download_audio(url, user_id):
 
 
 def make_png(text, color, style="modern"):
+    # Shape Persian/Arabic letters and apply RTL visual order for Pillow.
+    reshaped_text = arabic_reshaper.reshape(text)
+    display_text = get_display(reshaped_text)
     fp = font_path(style)
     if not fp:
         raise RuntimeError("فونت فارسی پیدا نشد.")
@@ -557,7 +560,17 @@ async def callback(update, context):
 
     if q.data == "menu_home":
         context.user_data.clear()
-        await q.edit_message_text("🎬 Delgraphyha Studio\n\nابزار را انتخاب کنید:", reply_markup=main_menu())
+        # Send a fresh Home message so Telegram jumps to the bottom of the chat.
+        try:
+            await q.message.reply_text(
+                "🏠 به صفحه اصلی برگشتید\n\n🎬 Delgraphyha Studio | دلگرافیها\n\nابزار را انتخاب کنید:",
+                reply_markup=main_menu()
+            )
+        except Exception:
+            await q.edit_message_text(
+                "🏠 به صفحه اصلی برگشتید\n\n🎬 Delgraphyha Studio | دلگرافیها\n\nابزار را انتخاب کنید:",
+                reply_markup=main_menu()
+            )
         return
 
     if q.data.startswith("menu_"):
