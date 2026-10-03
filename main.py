@@ -533,7 +533,7 @@ def make_png_pages(text, color, style="modern"):
     spacing = 28 if style == "nastaliq" else 22
     pad_x, pad_y = 70, 60
 
-    lines = _wrap_rtl_text(text, font, max_text_width=max_text_width)
+    lines = _wrap_rtl_text(text, font, max_width=max_text_width)
     chunks = [lines[i:i + max_lines_per_page]
               for i in range(0, len(lines), max_lines_per_page)]
 
